@@ -1,7 +1,7 @@
 import os
 import hashlib
 import traceback
-from flask import Flask, render_template, request, jsonify, send_from_directory
+from flask import Flask, render_template, request, jsonify
 from PIL import Image
 from PIL.ExifTags import TAGS
 from datetime import datetime
@@ -10,9 +10,9 @@ app = Flask(__name__)
 UPLOAD_FOLDER = 'uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.heic', '.webp'}
+# 拡張子の定義
+IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.heic'}
 
-# --- 共通関数 ---
 def calculate_hash(file_path):
     hasher = hashlib.md5()
     with open(file_path, 'rb') as f:
@@ -21,7 +21,10 @@ def calculate_hash(file_path):
     return hasher.hexdigest()
 
 def get_file_date(file_path):
+    # splitextの結果から[1]（拡張子部分）だけを取り出して小文字化する
     ext = os.path.splitext(file_path)[1].lower()
+    
+    # 1. 画像ならExifを試す
     if ext in IMAGE_EXTENSIONS:
         try:
             with Image.open(file_path) as image:
@@ -29,26 +32,24 @@ def get_file_date(file_path):
                 if exif_data:
                     for tag, value in exif_data.items():
                         if TAGS.get(tag) == 'DateTimeOriginal':
+                            # '2024:03:24 12:00:00' -> '2024-03-24'
                             val_str = str(value)
                             date_part = val_str.split(' ')[0]
                             return date_part.replace(':', '-')
-        except: pass
-    timestamp = os.path.getmtime(file_path)
-    return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d')
+        except Exception as e:
+            print(f"Exif parse error: {e}")
+    
+    # 2. 動画、Exifなし、またはエラー時は「ファイルの更新日時」
+    try:
+        timestamp = os.path.getmtime(file_path)
+        return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d')
+    except:
+        return "Unknown"
 
-def get_archive_list():
-    if not os.path.exists(UPLOAD_FOLDER): return []
-    dirs = [d[:7] for d in os.listdir(UPLOAD_FOLDER) if os.path.isdir(os.path.join(UPLOAD_FOLDER, d)) and len(d) >= 7]
-    return sorted(list(set(dirs)), reverse=True)
-
-# --- ルート設定 ---
-
-# 1. アップロード画面
 @app.route('/')
-def upload_page():
+def index():
     return render_template('index.html')
 
-# 2. アップロード処理 (API)
 @app.route('/upload', methods=['POST'])
 def upload_file():
     file = request.files.get('photo')
@@ -65,12 +66,13 @@ def upload_file():
         
         target_dir = os.path.join(UPLOAD_FOLDER, date_str)
         os.makedirs(target_dir, exist_ok=True)
+        
         final_path = os.path.join(target_dir, filename)
         
         if os.path.exists(final_path):
             if calculate_hash(final_path) == new_hash:
                 os.remove(temp_path)
-                return jsonify({"status": "skipped", "date": date_str})
+                return jsonify({"status": "skipped"})
             else:
                 name, ext = os.path.splitext(filename)
                 counter = 1
@@ -79,41 +81,12 @@ def upload_file():
                 final_path = os.path.join(target_dir, f"{name}_{counter}{ext}")
 
         os.replace(temp_path, final_path)
-        return jsonify({"status": "success", "date": date_str})
+        return jsonify({"status": "success"})
 
     except Exception as e:
         traceback.print_exc()
         if os.path.exists(temp_path): os.remove(temp_path)
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# 3. 閲覧画面 (年月アーカイブ)
-@app.route('/archive')
-@app.route('/archive/<month>')
-def view_page(month=None):
-    archive_list = get_archive_list()
-    if not month and archive_list:
-        month = archive_list[0]
-    
-    data = {}
-    if os.path.exists(UPLOAD_FOLDER) and month:
-        all_dirs = [d for d in os.listdir(UPLOAD_FOLDER) if os.path.isdir(os.path.join(UPLOAD_FOLDER, d))]
-        target_dirs = sorted([d for d in all_dirs if d.startswith(month)], reverse=True)
-        for date in target_dirs:
-            files_in_date = []
-            path = os.path.join(UPLOAD_FOLDER, date)
-            for filename in sorted(os.listdir(path)):
-                if filename.startswith('.'): continue
-                ext = os.path.splitext(filename)[1].lower()
-                files_in_date.append({"name": filename, "is_image": ext in IMAGE_EXTENSIONS})
-            data[date] = files_in_date
-
-    return render_template('viewer.html', data=data, archive_list=archive_list, current_month=month)
-
-# 4. ファイル配信用
-@app.route('/file/<date>/<filename>')
-def serve_file(date, filename):
-    return send_from_directory(os.path.join(UPLOAD_FOLDER, date), filename)
-
 if __name__ == '__main__':
-    # 統合したので 5000番 だけでOK
     app.run(host='0.0.0.0', port=5000, debug=True)
